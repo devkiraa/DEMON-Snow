@@ -6,45 +6,60 @@ import os # For path joining
 import numpy as np # For numerical operations, especially with YOLO output
 
 # --- Configuration ---
-AI_NAME_LONG = "Demon Snow"
+AI_NAME_LONG = "Deamon Snow"
 AI_NAME_SHORT = "Snow"
-USE_GUI = True # Set to False if you want to run without the camera window
+USE_GUI = True 
+
+# --- pyttsx3 Configuration ---
+try:
+    engine = pyttsx3.init()
+    voices = engine.getProperty('voices')
+    if voices and len(voices) > 1:
+        try:
+            engine.setProperty('voice', voices[1].id) 
+        except Exception: 
+            if voices: engine.setProperty('voice', voices[0].id) 
+    elif voices: 
+        engine.setProperty('voice', voices[0].id)
+    engine.setProperty('rate', 160)
+    engine.setProperty('volume', 0.9)
+    print("pyttsx3 engine initialized.")
+except Exception as e:
+    print(f"Error initializing pyttsx3 engine: {e}")
+    engine = None
 
 # --- DNN Model Configuration (YOLOv3-tiny) ---
 MODEL_DIR = "dnn_model"
-MODEL_CONFIG = os.path.join(MODEL_DIR, "yolov3-tiny.cfg") # YOLO config file
-MODEL_WEIGHTS = os.path.join(MODEL_DIR, "yolov3-tiny.weights") # YOLO weights file
+MODEL_CONFIG = os.path.join(MODEL_DIR, "yolov3-tiny.cfg")
+MODEL_WEIGHTS = os.path.join(MODEL_DIR, "yolov3-tiny.weights")
 CLASS_LABELS_FILE = os.path.join(MODEL_DIR, "coco.names")
 
-CONFIDENCE_THRESHOLD = 0.5 # Minimum confidence to consider a detection
-NMS_THRESHOLD = 0.4        # Non-Maximum Suppression threshold (for filtering overlapping boxes)
-DNN_INPUT_SIZE = (416, 416) # Input size for YOLOv3-tiny
+CONFIDENCE_THRESHOLD = 0.5 
+NMS_THRESHOLD = 0.4        
+DNN_INPUT_SIZE = (416, 416) 
+
+# --- Tracker Configuration ---
+TRACKER_TYPE = "CSRT" 
+IOU_THRESHOLD_FOR_NEW_TRACK = 0.3 # If IoU is less than this with existing tracks, consider it new
+MAX_TRACKERS = 10 # Limit the number of concurrent trackers for performance
+MAX_FRAMES_SINCE_SEEN_THRESHOLD = 3 # Number of DETECTION CYCLES before removing a stale track
 
 # Load class names
 try:
     with open(CLASS_LABELS_FILE, 'rt') as f:
         CLASS_NAMES = f.read().rstrip('\n').split('\n')
 except FileNotFoundError:
-    print(f"Error: Class labels file '{CLASS_LABELS_FILE}' not found. Make sure it's in the '{MODEL_DIR}' directory.")
+    print(f"Error: Class labels file '{CLASS_LABELS_FILE}' not found.")
     CLASS_NAMES = []
-    # exit() 
 
 # Load the DNN model (YOLO)
 try:
     if os.path.exists(MODEL_CONFIG) and os.path.exists(MODEL_WEIGHTS):
         net = cv2.dnn.readNetFromDarknet(MODEL_CONFIG, MODEL_WEIGHTS)
-        # Example: Set preferable backend and target if you have an NVIDIA GPU and OpenCV built with CUDA support
-        # if cv2.cuda.getCudaEnabledDeviceCount() > 0:
-        #     net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-        #     net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-        #     print("Attempting to use CUDA backend for DNN.")
-        # else:
-        #     print("CUDA not available or no CUDA-enabled GPU found. Using CPU for DNN.")
         print("YOLOv3-tiny DNN model loaded successfully.")
     else:
-        print(f"Error: YOLO Model files not found. Check paths: \nConfig: {MODEL_CONFIG}\nWeights: {MODEL_WEIGHTS}")
+        print(f"Error: YOLO Model files not found.")
         net = None
-        # exit()
 except cv2.error as e:
     print(f"OpenCV Error loading YOLO DNN model: {e}")
     net = None
@@ -52,29 +67,7 @@ except Exception as e:
     print(f"General Error loading YOLO DNN model: {e}")
     net = None
 
-
-# Initialize Text-to-Speech engine
-try:
-    engine = pyttsx3.init()
-    voices = engine.getProperty('voices')
-    if voices and len(voices) > 1: # Check if voices list is not empty and has more than one voice
-        try:
-            engine.setProperty('voice', voices[1].id) 
-            # print(f"Attempting to use voice: {voices[1].name}") 
-        except Exception: # Fallback to the first voice if setting the second one fails
-            if voices: engine.setProperty('voice', voices[0].id)
-    elif voices: # If only one voice is available
-        engine.setProperty('voice', voices[0].id)
-    # else: No voices found, engine will use default or may not work.
-    
-    engine.setProperty('rate', 160)
-    engine.setProperty('volume', 0.9)
-except Exception as e:
-    print(f"Error initializing TTS engine: {e}")
-    engine = None
-
-# --- Core Functions ---
-
+# --- Helper Functions ---
 def speak(text, use_short_name=True):
     ai_speaker_name = AI_NAME_SHORT if use_short_name else AI_NAME_LONG
     full_text_console = f"{ai_speaker_name}: {text}"
@@ -84,148 +77,128 @@ def speak(text, use_short_name=True):
             engine.say(text)
             engine.runAndWait()
         except Exception as e:
-            print(f"Error during speech: {e}")
+            print(f"Error during pyttsx3 speech: {e}")
     else:
-        print("TTS engine not available for speech.")
+        print("pyttsx3 engine not initialized. Cannot generate speech.")
 
 def initialize_camera(camera_index=0):
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
-        speak("Error: Could not open camera.", use_short_name=False)
+        speak("Error: Could not open camera.", False)
         return None
-    speak("Camera initialized successfully.", use_short_name=False)
+    speak("Camera initialized successfully.", False)
     return cap
 
-def get_output_layers(net):
-    """Get the names of the output layers from the network"""
-    layer_names = net.getLayerNames()
+def get_output_layers(net_model):
+    layer_names = net_model.getLayerNames()
     try:
-        output_layer_indices = net.getUnconnectedOutLayers()
+        output_layer_indices = net_model.getUnconnectedOutLayers()
         if isinstance(output_layer_indices, np.ndarray) and output_layer_indices.ndim == 2:
             output_layer_indices = output_layer_indices.flatten()
         return [layer_names[i - 1] for i in output_layer_indices]
-    except AttributeError: # Handle cases where getUnconnectedOutLayers might return a list of lists of ints
-         return [layer_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
+    except AttributeError: 
+         return [layer_names[i[0] - 1] for i in net_model.getUnconnectedOutLayers()]
     except Exception as e:
          print(f"Error getting output layers: {e}")
-         # Fallback or re-raise, depending on how critical this is.
-         # For now, let's assume it might be an older OpenCV and try the common old way if the above fails.
-         # This part might need adjustment based on the exact OpenCV version if errors persist here.
-         try:
-            return [layer_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
-         except Exception as e_inner:
-            print(f"Fallback for get_output_layers also failed: {e_inner}")
-            return [] # Return empty list to prevent crash, detection will fail.
+         return []
 
-
-def detect_objects_in_frame(frame):
-    """
-    Detects objects in the frame using the loaded YOLOv3-tiny model.
-    Returns a list of detected object names, confidences, and their bounding boxes.
-    """
-    detected_objects_info = [] 
-    
-    if net is None or not CLASS_NAMES:
-        return detected_objects_info
-
-    if frame is None:
-        print("Warning: Input frame for detection is None.")
-        return detected_objects_info
-
-    frame_height, frame_width = frame.shape[:2]
-    
+def create_tracker_instance(tracker_type_str): # Renamed from create_tracker to avoid conflict
+    tracker = None
+    # print(f"Attempting to create tracker: {tracker_type_str}") # Less verbose
     try:
-        blob = cv2.dnn.blobFromImage(frame, 1/255.0, DNN_INPUT_SIZE, swapRB=True, crop=False)
+        if tracker_type_str == "CSRT":
+            if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+                tracker = cv2.legacy.TrackerCSRT_create()
+            elif hasattr(cv2, 'TrackerCSRT_create'): 
+                tracker = cv2.TrackerCSRT_create()
+        # Add other tracker types if needed
+        if tracker is None:
+            print(f"Warning: Could not create tracker of type {tracker_type_str}.")
+    except Exception as e:
+        print(f"Error creating tracker '{tracker_type_str}': {e}")
+    return tracker
+
+def calculate_iou(boxA, boxB):
+    # box format: (x, y, w, h)
+    # Determine the (x, y)-coordinates of the intersection rectangle
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
+    yB = min(boxA[1] + boxA[3], boxB[1] + boxB[3])
+
+    # Compute the area of intersection rectangle
+    interArea = max(0, xB - xA) * max(0, yB - yA)
+    if interArea == 0:
+        return 0
+
+    # Compute the area of both the prediction and ground-truth rectangles
+    boxAArea = boxA[2] * boxA[3]
+    boxBArea = boxB[2] * boxB[3]
+
+    # Compute the intersection over union
+    iou = interArea / float(boxAArea + boxBArea - interArea)
+    return iou
+
+def detect_objects_in_frame(frame_to_detect):
+    detected_objects_info = [] 
+    if net is None or not CLASS_NAMES or frame_to_detect is None:
+        return detected_objects_info
+    frame_height, frame_width = frame_to_detect.shape[:2]
+    try:
+        blob = cv2.dnn.blobFromImage(frame_to_detect, 1/255.0, DNN_INPUT_SIZE, swapRB=True, crop=False)
         net.setInput(blob)
-        
         output_layers = get_output_layers(net)
-        if not output_layers: # If getting output layers failed
-            print("Error: Could not determine output layers for YOLO. Detection aborted.")
-            return detected_objects_info
-            
+        if not output_layers: return detected_objects_info
         layer_outputs = net.forward(output_layers)
         
-        boxes = []
-        confidences = []
-        class_ids = []
-
+        boxes, confidences, class_ids = [], [], []
         for output in layer_outputs:
             for detection in output:
                 scores = detection[5:] 
                 class_id = np.argmax(scores)
                 confidence = scores[class_id]
-                
                 if confidence > CONFIDENCE_THRESHOLD:
-                    center_x = int(detection[0] * frame_width)
-                    center_y = int(detection[1] * frame_height)
-                    width = int(detection[2] * frame_width)
-                    height = int(detection[3] * frame_height)
-                    
-                    x = int(center_x - width / 2)
-                    y = int(center_y - height / 2)
-                    
-                    boxes.append([x, y, width, height])
-                    confidences.append(float(confidence))
-                    class_ids.append(class_id)
+                    center_x, center_y = int(detection[0] * frame_width), int(detection[1] * frame_height)
+                    w, h = int(detection[2] * frame_width), int(detection[3] * frame_height)
+                    x, y = int(center_x - w / 2), int(center_y - h / 2)
+                    boxes.append([x, y, w, h]); confidences.append(float(confidence)); class_ids.append(class_id)
 
         indices = cv2.dnn.NMSBoxes(boxes, confidences, CONFIDENCE_THRESHOLD, NMS_THRESHOLD)
-
         if len(indices) > 0:
-            if isinstance(indices, np.ndarray) and indices.ndim == 2:
-                processed_indices = indices.flatten()
-            else:
-                processed_indices = indices # Assuming it's already flat or a simple list/tuple
-
+            processed_indices = indices.flatten() if isinstance(indices, np.ndarray) and indices.ndim == 2 else indices
             for i in processed_indices:
                 box = boxes[i]
-                x, y, w, h = box[0], box[1], box[2], box[3]
-                
-                class_name = "Unknown"
-                if class_ids[i] < len(CLASS_NAMES): # Check index bounds
-                    class_name = CLASS_NAMES[class_ids[i]]
-                else:
-                    print(f"Warning: class_id {class_ids[i]} out of bounds for CLASS_NAMES (len {len(CLASS_NAMES)})")
-
-                x1, y1 = max(0, x), max(0, y)
-                x2, y2 = min(frame_width -1 , x + w), min(frame_height -1, y + h)
-
-                if x2 > x1 and y2 > y1 : # Ensure valid box after clamping
-                    detected_objects_info.append((class_name, confidences[i], (x1, y1, x2-x1, y2-y1))) 
-    
-    except cv2.error as e:
-        print(f"OpenCV error during YOLO detection: {e}")
+                x_coord, y_coord, w_val, h_val = box[0], box[1], box[2], box[3]
+                class_name = CLASS_NAMES[class_ids[i]] if class_ids[i] < len(CLASS_NAMES) else "Unknown"
+                x1, y1 = max(0, x_coord), max(0, y_coord)
+                x2, y2 = min(frame_width -1 , x_coord + w_val), min(frame_height -1, y_coord + h_val)
+                if x2 > x1 and y2 > y1 :
+                    detected_objects_info.append({'label': class_name, 'confidence': confidences[i], 
+                                                  'bbox': (x1, y1, x2-x1, y2-y1)}) 
     except Exception as e:
-        print(f"General error during YOLO detection: {e}")
-        
+        print(f"Error during YOLO detection: {e}")
     return detected_objects_info
 
-
+# --- Main Loop ---
 def main_loop():
     global USE_GUI
-
-    speak(f"Initializing {AI_NAME_LONG} systems. Please stand by.", use_short_name=False)
-    
-    if net is None:
-        speak("Warning: Object detection model (YOLO) could not be loaded. Detection will be disabled.", use_short_name=True)
-    if not CLASS_NAMES:
-        speak("Warning: Class names not loaded. Object names might be incorrect or missing.", use_short_name=True)
+    speak(f"Initializing {AI_NAME_LONG} systems.", False)
+    if net is None or not CLASS_NAMES: speak("Critical error: Detection model/class names not loaded.", True)
+    if engine is None: speak("Warning: pyttsx3 voice synthesis not available.", True)
 
     cap = initialize_camera()
+    if not cap: return
+    speak("Systems online. I am now observing.", True)
 
-    if not cap:
-        speak("Exiting due to camera initialization failure.", use_short_name=False)
-        return
-
-    speak("Systems online. I am now observing.", use_short_name=True)
-
-    last_speech_time = time.time()
-    speech_interval = 7 
-    # More persistent memory for announced objects
-    announced_objects_memory = set() 
-    frames_with_no_detections_streak = 0
-    # Reset memory if nothing seen for this many speech intervals
-    MAX_NO_DETECTION_STREAK_FOR_MEMORY_RESET = 2 
-
+    active_trackers = [] # List of dicts: {'id': int, 'tracker': cv2.Tracker, 'label': str, 'bbox': tuple, 'frames_since_seen': int, 'active': bool}
+    next_tracker_id = 0
+    
+    frame_count = 0
+    DETECTION_INTERVAL_FRAMES = 15 # Run YOLO detection less frequently for multi-tracking
+    
+    last_general_speech_time = time.time()
+    general_speech_interval = 12
+    announced_labels_in_tracking = set() # To announce new *types* of tracked objects once
 
     gui_initialized_successfully = False
 
@@ -233,107 +206,165 @@ def main_loop():
         while True:
             ret, frame = cap.read()
             if not ret or frame is None:
-                speak("Error: Can't receive frame (stream end?). Exiting ...", use_short_name=True)
-                break
-
-            detected_objects_info = detect_objects_in_frame(frame.copy()) 
+                speak("Error: Can't receive frame. Exiting...", True); break
             
-            current_time = time.time()
-            
-            if current_time - last_speech_time > speech_interval:
-                current_frame_object_names = set(name for name, _, _ in detected_objects_info)
+            frame_count += 1
+            current_frame_for_drawing = frame.copy()
 
-                if not current_frame_object_names:
-                    frames_with_no_detections_streak += 1
-                else:
-                    # If objects are detected, reset the streak
-                    frames_with_no_detections_streak = 0 
+            # 1. Update existing trackers
+            lost_track_of_any = False
+            for track_info in active_trackers:
+                if track_info['active']:
+                    success, new_bbox = track_info['tracker'].update(frame)
+                    if success:
+                        track_info['bbox'] = tuple(map(int, new_bbox))
+                        # track_info['frames_since_seen'] = 0 # Reset if tracker update is considered "seen"
+                                                            # Or only reset on YOLO re-detection match
+                        if USE_GUI:
+                            p1 = (track_info['bbox'][0], track_info['bbox'][1])
+                            p2 = (track_info['bbox'][0] + track_info['bbox'][2], track_info['bbox'][1] + track_info['bbox'][3])
+                            cv2.rectangle(current_frame_for_drawing, p1, p2, (255, 0, 0), 2, 1) # Blue
+                            cv2.putText(current_frame_for_drawing, f"T{track_info['id']}:{track_info['label']}",
+                                        (p1[0], p1[1] - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,0,0), 1)
+                    else:
+                        track_info['active'] = False
+                        lost_track_of_any = True
+                        # Don't speak here yet, wait for cleanup phase or YOLO re-detection
 
-                # If nothing has been detected for a while, clear memory
-                if frames_with_no_detections_streak >= MAX_NO_DETECTION_STREAK_FOR_MEMORY_RESET:
-                    if announced_objects_memory: # Only speak if memory wasn't already empty
-                        speak("The scene appears to be clear now.")
-                    announced_objects_memory.clear()
-                    frames_with_no_detections_streak = 0 # Reset streak after clearing
-
-                # Determine which of the currently seen objects are new
-                objects_to_announce = current_frame_object_names - announced_objects_memory
+            # 2. Periodic YOLO Detection and Track Management
+            yolo_detections_this_cycle = []
+            if frame_count % DETECTION_INTERVAL_FRAMES == 0:
+                yolo_detections_this_cycle = detect_objects_in_frame(frame)
                 
-                if objects_to_announce:
-                    speakable_names = list(objects_to_announce)
-                    if len(speakable_names) == 1:
-                        speak(f"I now see a {speakable_names[0]}.")
-                    elif len(speakable_names) > 1:
-                        if len(speakable_names) > 2:
-                            items_speech = "a " + ", a ".join(speakable_names[:-1]) + f", and a {speakable_names[-1]}"
-                        else: # Exactly two items
-                            items_speech = f"a {speakable_names[0]} and a {speakable_names[1]}"
-                        speak(f"I can also see {items_speech}.")
+                # Increment frames_since_seen for tracks not refreshed by current YOLO detections
+                for track_info in active_trackers:
+                    if track_info['active']: # Only for active ones
+                        track_info['frames_since_seen'] += 1
+
+                for det in yolo_detections_this_cycle:
+                    det_bbox = det['bbox']
+                    det_label = det['label']
+                    is_new_object = True
+
+                    # Check against existing active tracks
+                    for track_info in active_trackers:
+                        if track_info['active'] and track_info['label'] == det_label:
+                            iou = calculate_iou(det_bbox, track_info['bbox'])
+                            if iou > IOU_THRESHOLD_FOR_NEW_TRACK: # Consider it the same object
+                                is_new_object = False
+                                track_info['bbox'] = det_bbox # Update bbox with more accurate YOLO detection
+                                track_info['frames_since_seen'] = 0 # Refreshed by YOLO
+                                # Re-initialize tracker for better accuracy if desired (can be costly)
+                                # track_info['tracker'] = create_tracker_instance(TRACKER_TYPE)
+                                # if track_info['tracker']: track_info['tracker'].init(frame, det_bbox)
+                                break 
                     
-                    # Add newly announced objects to the persistent memory
-                    announced_objects_memory.update(objects_to_announce)
-                
-                last_speech_time = current_time
-            # End of speech block
+                    if is_new_object and len(active_trackers) < MAX_TRACKERS:
+                        new_tracker_obj = create_tracker_instance(TRACKER_TYPE)
+                        if new_tracker_obj:
+                            init_success = new_tracker_obj.init(frame, det_bbox)
+                            if init_success:
+                                active_trackers.append({
+                                    'id': next_tracker_id, 'tracker': new_tracker_obj, 
+                                    'label': det_label, 'bbox': det_bbox,
+                                    'frames_since_seen': 0, 'active': True
+                                })
+                                if det_label not in announced_labels_in_tracking:
+                                    speak(f"I've started tracking a {det_label}.", True)
+                                    announced_labels_in_tracking.add(det_label)
+                                next_tracker_id += 1
+                            # else: speak(f"Failed to init tracker for new {det_label}", True) # Too verbose
 
+                # Cleanup inactive/stale trackers
+                updated_active_trackers = []
+                for track_info in active_trackers:
+                    if track_info['active'] and track_info['frames_since_seen'] <= MAX_FRAMES_SINCE_SEEN_THRESHOLD:
+                        updated_active_trackers.append(track_info)
+                    else:
+                        if not track_info['active']: # Lost by tracker.update()
+                             speak(f"I've lost track of {track_info['label']} (ID {track_info['id']}).", True)
+                        elif track_info['frames_since_seen'] > MAX_FRAMES_SINCE_SEEN_THRESHOLD: # Lost by staleness
+                             speak(f"{track_info['label']} (ID {track_info['id']}) seems to be gone.", True)
+                        
+                        if track_info['label'] in announced_labels_in_tracking:
+                            # Check if any other instance of this label is still being tracked
+                            if not any(t['label'] == track_info['label'] and t['active'] for t in active_trackers if t['id'] != track_info['id']):
+                                announced_labels_in_tracking.discard(track_info['label'])
+                active_trackers = updated_active_trackers
+
+
+            # 3. General Speech for non-tracked but detected objects (from current YOLO cycle)
+            current_time = time.time()
+            if yolo_detections_this_cycle and (current_time - last_general_speech_time > general_speech_interval):
+                objects_to_mention_general = []
+                current_tracked_labels_with_ids = {f"{t['label']}_T{t['id']}" for t in active_trackers if t['active']}
+
+                for det in yolo_detections_this_cycle:
+                    # Avoid general announcement if a similar object is actively tracked (even if different ID)
+                    is_actively_tracked_type = False
+                    for track_info in active_trackers:
+                        if track_info['active'] and track_info['label'] == det['label']:
+                            iou_with_tracked = calculate_iou(det['bbox'], track_info['bbox'])
+                            if iou_with_tracked > 0.5: # If a YOLO box strongly overlaps an active track of same type
+                                is_actively_tracked_type = True
+                                break
+                    if not is_actively_tracked_type:
+                         objects_to_mention_general.append(det['label'])
+                
+                # Make general announcements less repetitive
+                unique_general_mentions = list(set(objects_to_mention_general))
+                if unique_general_mentions:
+                    if len(unique_general_mentions) == 1:
+                        speak(f"I also see a {unique_general_mentions[0]} in the scene.")
+                    else:
+                        items_speech = "a " + ", a ".join(unique_general_mentions[:-1]) + f", and a {unique_general_mentions[-1]}"
+                        speak(f"Also in the scene: {items_speech}.")
+                last_general_speech_time = current_time
+
+
+            # 4. Display
             if USE_GUI:
                 try:
-                    # Draw bounding boxes on the frame for all currently detected objects
-                    for name, confidence, box in detected_objects_info:
-                        x, y, w, h = box
-                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                        label = f"{name}: {confidence:.2f}"
-                        cv2.putText(frame, label, (x, y - 10 if y - 10 > 10 else y + 15), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    # Draw YOLO boxes from the latest detection cycle (green)
+                    if frame_count % DETECTION_INTERVAL_FRAMES == 0:
+                        for det in yolo_detections_this_cycle:
+                            is_being_actively_tracked = False
+                            for track_info in active_trackers:
+                                if track_info['active'] and track_info['label'] == det['label'] and \
+                                   calculate_iou(det['bbox'], track_info['bbox']) > 0.5 : # Check if this yolo box corresponds to an active track
+                                    is_being_actively_tracked = True
+                                    break
+                            if not is_being_actively_tracked: # Only draw YOLO box if not actively tracked (blue)
+                                x, y, w, h = det['bbox']
+                                cv2.rectangle(current_frame_for_drawing, (x,y), (x+w, y+h), (0,255,0), 2)
+                                cv2.putText(current_frame_for_drawing, f"{det['label']}: {det['confidence']:.2f}",
+                                            (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
 
-                    cv2.imshow(f'{AI_NAME_SHORT} Vision (YOLO) - Press Q to Quit', frame)
+                    cv2.imshow(f'{AI_NAME_SHORT} Vision (Multi-Tracking) - Q to Quit', current_frame_for_drawing)
                     gui_initialized_successfully = True
                 except cv2.error as e:
                     if "The function is not implemented" in str(e):
-                        if not gui_initialized_successfully: # Show detailed warning only once
-                            print("\n***************************************************************************")
-                            print("OpenCV GUI Error: Cannot display camera window.")
-                            print("Please ensure OpenCV is installed correctly with GUI support (e.g., pip install opencv-python).")
-                            print("If issues persist, your system might lack underlying GUI libraries for OpenCV.")
-                            print("Setting USE_GUI = False to continue without camera view.")
-                            print("***************************************************************************\n")
-                            speak("Warning: I cannot display the camera feed. Disabling GUI.", use_short_name=True)
-                        USE_GUI = False # Disable further GUI attempts
-                    else: # Other OpenCV errors related to imshow
-                        print(f"An unexpected OpenCV error occurred with imshow: {e}")
-                        speak("An error occurred with the display window. Disabling GUI.", use_short_name=True)
+                        if not gui_initialized_successfully: print_opencv_gui_warning(); speak("Warning: Display disabled.",True)
                         USE_GUI = False 
+                    else: print(f"imshow error: {e}"); speak("Display error.",True); USE_GUI = False 
             
-            # Key press handling
-            if gui_initialized_successfully or USE_GUI : # If GUI is supposed to be active
-                key_press = cv2.waitKey(1) & 0xFF
-                if key_press == ord('q'):
-                    speak("Deactivating. Farewell.", use_short_name=True)
-                    break
-            else: # If GUI is off, allow console interrupt or just loop
-                time.sleep(0.05) # Small delay to prevent tight loop if no GUI and no waitKey
+            key_press = cv2.waitKey(1) & 0xFF
+            if key_press == ord('q'): speak("Deactivating.", True); break
 
-    except KeyboardInterrupt:
-        speak("Deactivation requested via Keyboard Interrupt. Farewell.", use_short_name=True)
+    except KeyboardInterrupt: speak("Deactivation requested.", True)
     finally:
-        if cap:
-            cap.release()
-        if gui_initialized_successfully: # Only destroy windows if they were shown
-            try:
-                cv2.destroyAllWindows()
-            except cv2.error as e:
-                print(f"Notice: cv2.destroyAllWindows() also encountered an issue: {e}")
-        speak(f"{AI_NAME_LONG} systems offline.", use_short_name=False)
+        if cap: cap.release()
+        if gui_initialized_successfully:
+            try: cv2.destroyAllWindows()
+            except cv2.error: pass # Ignore error if window already closed
+        speak(f"{AI_NAME_LONG} systems offline.", False)
+
+def print_opencv_gui_warning():
+    print("\n*** OpenCV GUI Error: Cannot display camera window. Ensure 'opencv-contrib-python' is installed and GUI libs are available. Disabling GUI. ***\n")
 
 if __name__ == '__main__':
-    # Initial check for model files before starting anything else
     if not all([os.path.exists(MODEL_CONFIG), os.path.exists(MODEL_WEIGHTS), os.path.exists(CLASS_LABELS_FILE)]):
-        print("\n--- CRITICAL ERROR ---")
-        print("One or more YOLO DNN model files are missing from the 'dnn_model' directory:")
-        if not os.path.exists(MODEL_CONFIG): print(f" - Missing: {MODEL_CONFIG}")
-        if not os.path.exists(MODEL_WEIGHTS): print(f" - Missing: {MODEL_WEIGHTS}")
-        if not os.path.exists(CLASS_LABELS_FILE): print(f" - Missing: {CLASS_LABELS_FILE}")
-        print("Please download them and place them correctly. Exiting.")
+        print("\n--- CRITICAL ERROR: Model files missing. Please check 'dnn_model' directory. Exiting. ---")
     else:
-        speak(f"Hello! I am {AI_NAME_LONG}, but you can call me {AI_NAME_SHORT}.", use_short_name=False)
+        speak(f"Hello! I am {AI_NAME_LONG}, but you can call me {AI_NAME_SHORT}.", False)
         main_loop()
