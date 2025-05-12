@@ -38,31 +38,60 @@ HIGH_PRIORITY_CLASSES = ["person", "car", "truck", "bus", "motorcycle", "bicycle
 FOCUS_ZONE_ENABLED = True 
 FOCUS_ZONE_RATIOS = (0.25, 0.25, 0.75, 0.75) # Focus OCR on this central area
 
+# --- Text Suggestion Keywords ---
+HIGH_PRIORITY_TEXT_KEYWORDS = {
+    "DANGER": "High threat indicated by text.",
+    "WARNING": "Warning observed in text.",
+    "EXPLOSIVE": "Potential explosive hazard indicated by text.",
+    "MINEFIELD": "Possible minefield indicated by text.",
+    "MINE": "Possible explosive device indicated by text.", # Keep MINEFIELD before MINE for more specific match
+    "IED": "Potential IED indicated by text.",
+    "HOSTILE": "Hostile indicator in text.",
+    "AMBUSH": "Possible ambush indicated by text."
+}
+GENERAL_TEXT_KEYWORDS = {
+    "EXIT": "Possible exit point identified.",
+    "ENTRANCE": "Possible entry point identified.",
+    "STOP": "Instruction to stop or halt observed.",
+    "HALT": "Instruction to halt observed.",
+    "NORTH": "Directional marker 'North' observed.",
+    "SOUTH": "Directional marker 'South' observed.",
+    "EAST": "Directional marker 'East' observed.",
+    "WEST": "Directional marker 'West' observed.",
+    "CAUTION": "Caution advised based on text.",
+    "RESTRICTED": "Restricted area indicated by text.",
+    "AUTHORIZED": "Authorization context in text.", # Could be "AUTHORIZED PERSONNEL ONLY"
+    "CHECKPOINT": "Checkpoint indicated by text."
+    # Numbers that look like coordinates (e.g., "N34 E18", "34.123, -118.456") 
+    # would require more complex regex parsing, not added here for simplicity yet.
+}
+
+
 # --- pyttsx3 Configuration ---
 engine = None 
 
 # --- DNN Model Configuration (Ultralytics YOLOv8m) ---
 MODEL_DIR = "dnn_model" 
 CLASS_LABELS_FILE = os.path.join(MODEL_DIR, "coco.names")
-YOLO_MODEL_NAME = 'yolov11m.pt' # UPGRADED to Medium model
+YOLO_MODEL_NAME = 'yolov8m.pt' 
 
-CONFIDENCE_THRESHOLD = 0.55 # Confidence threshold for YOLO detections
+CONFIDENCE_THRESHOLD = 0.55 
 # NMS_THRESHOLD handled by ultralytics
 # DNN_INPUT_SIZE handled by ultralytics
 
 # --- Tracker Configuration ---
 TRACKER_TYPE = "CSRT" 
 IOU_THRESHOLD_FOR_NEW_TRACK = 0.3 
-MAX_TRACKERS = 4 # Reduced slightly more for heavier model
+MAX_TRACKERS = 4 
 MAX_FRAMES_SINCE_SEEN_THRESHOLD = 4 
 
 # --- OCR Configuration ---
-OCR_INTERVAL_CYCLES = 3 # Run OCR every N detection cycles
-OCR_CONFIDENCE_THRESHOLD = 40 # Tesseract confidence threshold (0-100)
+OCR_INTERVAL_CYCLES = 3 
+OCR_CONFIDENCE_THRESHOLD = 40 
 
 # --- Threading Queues ---
 frame_queue = queue.Queue(maxsize=1) 
-detection_results_queue = queue.Queue(maxsize=1) # Will now include OCR results
+detection_results_queue = queue.Queue(maxsize=1) 
 speech_queue = queue.Queue(maxsize=10) 
 
 # Load class names
@@ -90,7 +119,7 @@ def speak(text, use_short_name=True, is_priority=False):
     print(full_text_console)
     try:
         speech_queue.put_nowait({'text': f"{prefix}{text}", 'is_priority': is_priority})
-    except queue.Full: pass # Ignore if queue is full
+    except queue.Full: pass 
 
 def initialize_camera(camera_index=0):
     cap = cv2.VideoCapture(camera_index)
@@ -194,9 +223,8 @@ def detection_worker(frame_q, results_q, stop_event):
             
             frame_to_detect, frame_w_local, frame_h_local = frame_data
             detected_objects_info = []
-            ocr_results_text = None # Initialize OCR results for this cycle
+            ocr_results_text = None 
 
-            # --- Object Detection ---
             if local_model and CLASS_NAMES and frame_to_detect is not None:
                 try:
                     results = local_model.predict(frame_to_detect, conf=CONFIDENCE_THRESHOLD, verbose=False) 
@@ -219,53 +247,30 @@ def detection_worker(frame_q, results_q, stop_event):
                 except Exception as e:
                     print(f"Detection thread error during YOLO processing: {e}") 
 
-            # --- OCR Processing (Periodic & Enabled) ---
             detection_cycle_count += 1
             if OCR_ENABLED and (detection_cycle_count % OCR_INTERVAL_CYCLES == 0):
                 try:
-                    # Extract Focus Zone for OCR
                     if FOCUS_ZONE_ENABLED and frame_to_detect is not None:
                         fz_x1_ocr = int(FOCUS_ZONE_RATIOS[0] * frame_w_local)
                         fz_y1_ocr = int(FOCUS_ZONE_RATIOS[1] * frame_h_local)
                         fz_x2_ocr = int(FOCUS_ZONE_RATIOS[2] * frame_w_local)
                         fz_y2_ocr = int(FOCUS_ZONE_RATIOS[3] * frame_h_local)
-                        
                         focus_roi = frame_to_detect[fz_y1_ocr:fz_y2_ocr, fz_x1_ocr:fz_x2_ocr]
-
-                        if focus_roi.size > 0: # Check if ROI is valid
-                            # Convert ROI to grayscale for potentially better OCR
+                        if focus_roi.size > 0: 
                             gray_roi = cv2.cvtColor(focus_roi, cv2.COLOR_BGR2GRAY)
-                            # Optional: Apply thresholding or other preprocessing
-                            # _, thresh_roi = cv2.threshold(gray_roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                            
-                            # Perform OCR using pytesseract
-                            # Use --psm 6 for assuming a single uniform block of text
                             custom_config = r'--oem 3 --psm 6' 
                             ocr_data = pytesseract.image_to_data(gray_roi, config=custom_config, output_type=pytesseract.Output.DICT)
-                            
-                            # Extract text with confidence > threshold
                             extracted_texts = []
                             for i in range(len(ocr_data['text'])):
                                 if int(ocr_data['conf'][i]) > OCR_CONFIDENCE_THRESHOLD:
                                     text = ocr_data['text'][i].strip()
-                                    if text: # Ignore empty strings
-                                        extracted_texts.append(text)
-                            
-                            if extracted_texts:
-                                ocr_results_text = " ".join(extracted_texts)
-                                # print(f"OCR Detected Text: {ocr_results_text}") # Print in thread for debug
-                        # else: print("OCR Focus Zone ROI is empty.") # Debug
-                    # else: print("OCR skipped: Focus zone disabled or invalid frame.") # Debug
-
+                                    if text: extracted_texts.append(text)
+                            if extracted_texts: ocr_results_text = " ".join(extracted_texts)
                 except pytesseract.TesseractNotFoundError:
                      print("OCR Error: Tesseract executable not found or not in PATH.")
-                     print("Please install Tesseract and/or set pytesseract.pytesseract.tesseract_cmd")
-                     # Disable OCR to prevent repeated errors in this session
-                     # global OCR_ENABLED # This won't work directly, need a different mechanism if you want to disable it permanently from thread
                 except Exception as e:
                     print(f"OCR thread error during processing: {e}")
             
-            # --- Put results (detections and OCR) in queue ---
             try:
                 results_q.put({'detections': detected_objects_info, 'ocr_text': ocr_results_text}, block=False) 
             except queue.Full: pass 
@@ -275,6 +280,27 @@ def detection_worker(frame_q, results_q, stop_event):
             print(f"Outer detection worker error: {e}")
             time.sleep(0.1) 
     print("Detection worker thread stopped.")
+
+# --- Text Suggestion Function ---
+def process_ocr_for_suggestions(ocr_text):
+    if not ocr_text:
+        return
+
+    text_upper = ocr_text.upper() 
+
+    # Check for high-priority keywords first
+    for keyword, suggestion in HIGH_PRIORITY_TEXT_KEYWORDS.items():
+        if keyword in text_upper:
+            speak(f"Text Suggestion: {suggestion}", True, is_priority=True)
+            return # Stop after first high-priority match
+
+    # If no high-priority, check for general keywords (only if not in stealth mode)
+    if not STEALTH_MODE:
+        for keyword, suggestion in GENERAL_TEXT_KEYWORDS.items():
+            if keyword in text_upper:
+                speak(f"Text Suggestion: {suggestion}", True, is_priority=False)
+                return # Stop after first general match for this cycle
+
 
 # --- Main Loop ---
 def main_loop():
@@ -320,8 +346,8 @@ def main_loop():
     announced_labels_in_tracking = set() 
     last_status_report_time = time.time()
     status_report_interval = 30 
-    last_ocr_report_time = time.time()
-    ocr_report_interval = 10 # How often to report detected text (if any)
+    last_ocr_process_time = time.time() # Renamed from last_ocr_report_time
+    ocr_process_interval = 7 # How often to process text for suggestions
 
     gui_initialized_successfully = False
     simulated_sound_event_triggered = False
@@ -339,7 +365,7 @@ def main_loop():
             except queue.Empty: pass 
 
             try:
-                while not detection_results_queue.empty(): # Get the latest result
+                while not detection_results_queue.empty(): 
                     latest_results = detection_results_queue.get_nowait()
             except queue.Empty: pass 
             
@@ -418,9 +444,8 @@ def main_loop():
                             announced_labels_in_tracking.discard(track_info['label'])
             active_trackers = updated_active_trackers
             
-            # --- Speech: General & OCR ---
+            # --- Speech: General & OCR Suggestions ---
             current_time = time.time()
-            # General object observations (if not stealth)
             if not STEALTH_MODE and yolo_detections_this_cycle and (current_time - last_general_speech_time > general_speech_interval):
                 objects_to_mention_general = []
                 current_active_track_bboxes = {t['id']: t['bbox'] for t in active_trackers if t['active']}
@@ -440,11 +465,10 @@ def main_loop():
                     else: speak(f"General observation: a " + ", a ".join(unique_general_mentions) + ".")
                 last_general_speech_time = current_time
             
-            # OCR Text Reporting (if enabled and text found, not in stealth)
-            if OCR_ENABLED and ocr_text_this_cycle and not STEALTH_MODE and (current_time - last_ocr_report_time > ocr_report_interval):
-                 # Basic report - more sophisticated filtering could be added
-                 speak(f"Detected text in focus zone: {ocr_text_this_cycle[:100]}{'...' if len(ocr_text_this_cycle)>100 else ''}") 
-                 last_ocr_report_time = current_time
+            # Process OCR Text for Suggestions
+            if OCR_ENABLED and ocr_text_this_cycle and (current_time - last_ocr_process_time > ocr_process_interval):
+                 process_ocr_for_suggestions(ocr_text_this_cycle)
+                 last_ocr_process_time = current_time
 
 
             # --- Status Report ---
@@ -492,13 +516,11 @@ def main_loop():
                         cv2.rectangle(current_frame_for_drawing, (fz_x1, fz_y1), (fz_x2, fz_y2), (0, 255, 255), 1) 
                         cv2.putText(current_frame_for_drawing, "Focus Zone", (fz_x1, fz_y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,255),1)
                     
-                    # Display OCR text (if enabled and found)
                     if OCR_ENABLED and ocr_text_this_cycle:
                          cv2.putText(current_frame_for_drawing, "OCR:"+ocr_text_this_cycle[:30], (10, frame_height - 10), 
-                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1) # Cyan text at bottom-left
+                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1) 
 
-
-                    title_status = f"S:{'ON' if STEALTH_MODE else 'OFF'}|L:{'ON' if LOW_LIGHT_MODE else 'OFF'}|A:{'ON' if SOUND_DETECTION_MODE else 'OFF'}|R:{'ON' if SYSTEM_STATUS_REPORTING else 'OFF'}|T:{'ON' if OCR_ENABLED else 'OFF'}" # Added OCR status
+                    title_status = f"S:{'ON' if STEALTH_MODE else 'OFF'}|L:{'ON' if LOW_LIGHT_MODE else 'OFF'}|A:{'ON' if SOUND_DETECTION_MODE else 'OFF'}|R:{'ON' if SYSTEM_STATUS_REPORTING else 'OFF'}|T:{'ON' if OCR_ENABLED else 'OFF'}" 
                     cv2.imshow(f'{AI_NAME_SHORT} Field Ops ({title_status}) - Q:Quit', current_frame_for_drawing)
                     gui_initialized_successfully = True
                 except cv2.error as e:
@@ -516,10 +538,9 @@ def main_loop():
                 if SOUND_DETECTION_MODE: simulated_sound_event_triggered = True 
                 else: speak("Sound detection mode is off.", True)
             elif key_press == ord('r'): SYSTEM_STATUS_REPORTING = not SYSTEM_STATUS_REPORTING; speak(f"System Status Reporting {'ENABLED' if SYSTEM_STATUS_REPORTING else 'DISABLED'}.", True, is_priority=True)
-            elif key_press == ord('t'): # Toggle OCR
+            elif key_press == ord('t'): 
                 OCR_ENABLED = not OCR_ENABLED
                 speak(f"OCR Text Detection {'ENABLED' if OCR_ENABLED else 'DISABLED'}.", True, is_priority=True)
-
 
     except KeyboardInterrupt: speak("Deactivation by user interrupt.", True, is_priority=True)
     finally:
@@ -530,7 +551,7 @@ def main_loop():
         if detection_thread.is_alive():
             try: frame_queue.put_nowait(None) 
             except queue.Full: pass
-            detection_thread.join(timeout=2.0) # Longer timeout for YOLOv8m
+            detection_thread.join(timeout=2.0) 
         
         if speech_thread.is_alive():
             try: speech_queue.put_nowait({'text': "Finalizing shutdown.", 'is_priority': False}) 
